@@ -64,9 +64,9 @@ protected:
     int errorFlag ;
     void sendMessage( uint8_t cls, uint8_t subcls, uint16_t len, uint8_t *payload ) ;
 
-    double longitude ;
-    double latitude ;
-    std::thread gps_reader_thread ;
+    volatile double longitude ;
+    volatile double latitude ;
+    std::thread *gps_reader_thread ;
 
     void parseRMC( const char *msg ) ;
     void readDevice() ;
@@ -75,8 +75,9 @@ protected:
 public :
     GPS( const char *serialDevices[], int numDevices ) ;
     virtual ~GPS() ;
-    
+
     void start() ;
+    void stop() ;
 
     int operator !() const { return errorFlag ; }
     operator int() const { return gpsDev ; }

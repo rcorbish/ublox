@@ -1,15 +1,17 @@
 
-#include <sys/stat.h>
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
-#include <iostream>
-#include  <iomanip>
 
 #include "gps.hpp"
 
 int parseFloat( double &val, const char *p, int len ) ;
+double convertToDegrees( double degMin ) ;
 
+//
+// A list of all the NMEA message IDs ( so we can turn them off )
+//
 constexpr uint8_t ALL_NMEA_MSGS[] = {
         GPS::NMEA_MSG_DTM ,
         GPS::NMEA_MSG_GBQ ,
@@ -31,46 +33,105 @@ constexpr uint8_t ALL_NMEA_MSGS[] = {
         GPS::NMEA_MSG_ZDA 
     } ;
 
-
+/*
+ * Create a new instance of the GPS, search (in order) the
+ * given serial devices for anything available to open. The
+ * first openable serial port is considered to be a GPS device
+ * 
+ * @param serialDevices an array of const device names (e.g. /dev/ttyACM0 )
+ * #param numDevices count of possible devices to search
+ */
 GPS::GPS( const char *serialDevices[], int numDevices ) {
                         
     for( int i=0 ; i<numDevices; i++ ) {
         gpsDev = open( serialDevices[i], O_RDWR  ) ;
         if( gpsDev > 0 ) break ;
     }
+    // Couldn't get anything ?
     if (gpsDev < 0) {
         perror("open: ");
     }
+
+    gps_reader_thread = nullptr ;
+    // Assume we're in error until we've got a good signal
     errorFlag = true ;    
 }
 
+/*
+ * The destructor makes a request to shutdown the background thread
+ * If the thread is running, wait for it to complete. Then close the
+ * file.
+ */
 GPS::~GPS() {
-    threadAlive = false ;
-    gps_reader_thread.join() ;
+    stop() ;
+    if( gpsDev ) {
+        close( gpsDev ) ;
+        gpsDev = 0 ;
+    }
 }
 
-
+/*
+ * This starts the background thread to read the GPS. It's not 
+ * part of the constructor so that initialization of reading
+ * is under external control. (and it's really bad to start a
+ * thread in a constructor)
+ * 
+ * This clears out any pending messages in the buffer.
+ */
 void GPS::start() {
     threadAlive = true ;
-    gps_reader_thread = std::thread( &GPS::readDevice, this ) ;
+    
+    char buffer[32] ;
+    int n = read( gpsDev, buffer, sizeof(buffer) ) ; 
+    while( n==sizeof(buffer) ) {
+        n = read( gpsDev, buffer, sizeof(buffer) ) ; 
+    }
+
+    gps_reader_thread = new std::thread( &GPS::readDevice, this ) ;    
 }
 
+/*
+ * This stop the background thread which reads the GPS. 
+ * This isn't strictly thread safe ( don't call stop()
+ * from many threads! )
+ */
+void GPS::stop() {
+    threadAlive = false ;
+    if( gps_reader_thread != nullptr ) {
+        gps_reader_thread->join() ;
+        delete gps_reader_thread ;
+        gps_reader_thread = nullptr ;
+    }
+}
+
+/*
+ * Parse out the RMC message, which is the minumum message 
+ * supported by a GPS receiver. This method is called from the 
+ * background thread.
+ * 
+ * @param msg the full text of an RMC message "$GPRMC,012345.00,...""
+ */
 void GPS::parseRMC( const char *msg ) {
     int l = strlen( msg ) ;
     if( l>20 ) {
+        // Make sure we start with the proper msg type
         if( msg[0] == '$' &&
             msg[3] == 'R' &&
             msg[4] == 'M' &&
             msg[5] == 'C' &&
             msg[6] == ',' ) {
 
+            // Skip the msg name
             const char *p = msg+7 ;
             l-= 7 ;
 
+            // Read 1 float number - the timestamp in GPS time
             double tim ;
             int n = parseFloat( tim, p, l ) ;
             p += n ;
+            l -= n ;
 
+            // Check the valid flag A=OK, V=bad (huh?)
             if( *p++ != 'A' ) {
                 errorFlag = true ;
                 return ;
@@ -80,11 +141,11 @@ void GPS::parseRMC( const char *msg ) {
                 return ;
             }
 
-
+            // Read another float
             double latitude ;
             n = parseFloat( latitude, p, l ) ;
             p += n ;
-
+            // This indicates sign (Australia is negative)
             if( *p++ == 'S' ) {
                 latitude = -latitude ;
             }
@@ -92,21 +153,33 @@ void GPS::parseRMC( const char *msg ) {
                 errorFlag = true ;
                 return ;
             }
-
+            // And one more float
             double longitude ;
             n = parseFloat( longitude, p, l ) ;
             p += n ;
+            // West is negative
             if( *p++ == 'W' ) {
                 longitude = -longitude ;
             }
 
+            // If we got here - the data is valid
             errorFlag = false ;
-            this->latitude = latitude ;
-            this->longitude = longitude ;
+
+            // Set the values into class member (volatile)
+            this->latitude = convertToDegrees( latitude ) ;
+            this->longitude = convertToDegrees( longitude ) ;
         }
     }
 }
 
+double convertToDegrees( double degMin ) {
+    int deg = (int)( degMin / 100.0 ) ;
+    double min = degMin - ( deg * 100 ) ;
+    return deg + min / 60.0 ;
+}
+
+// Helper method to read a float from a string - like atof() 
+// without the null terminator
 int parseFloat( double &result, const char *p, int len ) {
     double val = 0 ;
     double scale = 0 ;
@@ -128,18 +201,26 @@ int parseFloat( double &result, const char *p, int len ) {
     return n + 1 ;
 }
 
-
+/*
+ * This is the background thread method, which checks the 
+ * device for new data. Once it detects a full message
+ * it's sent for parsing (see parseRMC)
+ * It will run until the flag threadAlive is cleared
+ */
 void GPS::readDevice() {
 
     char buffer[256] ;
     char *buf_end = buffer + sizeof(buffer) ;
-    char *writeStart = buffer ;
+    char *writeStart = buffer ; 
     while( threadAlive )  {
         // read from gpsDev into availableSpace plus maximum left in buffer
         int n = read( gpsDev, writeStart, buf_end - writeStart ) ; 
         if( n<0 ) {
+            // If we get an error, we'll shutdown. Is that right?
+            errorFlag = true ;
             perror( "read: " ) ;
-            return ;
+            stop() ;
+            continue ;
         }
 
         // replace /r & /n in the just read text
