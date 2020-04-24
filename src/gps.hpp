@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include <thread>        
+
 class GPS {
 
 public :
@@ -57,26 +59,35 @@ public :
 
 
 protected:
+    volatile int threadAlive ;
     int gpsDev ;
     int errorFlag ;
     void sendMessage( uint8_t cls, uint8_t subcls, uint16_t len, uint8_t *payload ) ;
 
     double longitude ;
     double latitude ;
+    std::thread gps_reader_thread ;
 
     void parseRMC( const char *msg ) ;
+    void readDevice() ;
+
+
 public :
     GPS( const char *serialDevices[], int numDevices ) ;
+    virtual ~GPS() ;
+    
+    void start() ;
 
     int operator !() const { return errorFlag ; }
     operator int() const { return gpsDev ; }
-    void readDevice() ;
 
     void turnOffMessage(  uint8_t msgClass, uint8_t msgId ) ;
     void turnOnMessage( uint8_t msgClass, uint8_t msgId ) ;
     void reboot( bool cold=false ) ;
     void turnOffAllMessages( ) ;
 
+    double getLongitude() { return this->longitude ; }
+    double getLatitude() { return this->latitude ; }
 } ;
 
 

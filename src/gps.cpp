@@ -33,6 +33,7 @@ constexpr uint8_t ALL_NMEA_MSGS[] = {
 
 
 GPS::GPS( const char *serialDevices[], int numDevices ) {
+                        
     for( int i=0 ; i<numDevices; i++ ) {
         gpsDev = open( serialDevices[i], O_RDWR  ) ;
         if( gpsDev > 0 ) break ;
@@ -40,9 +41,19 @@ GPS::GPS( const char *serialDevices[], int numDevices ) {
     if (gpsDev < 0) {
         perror("open: ");
     }
-    errorFlag = true ;
+    errorFlag = true ;    
 }
 
+GPS::~GPS() {
+    threadAlive = false ;
+    gps_reader_thread.join() ;
+}
+
+
+void GPS::start() {
+    threadAlive = true ;
+    gps_reader_thread = std::thread( &GPS::readDevice, this ) ;
+}
 
 void GPS::parseRMC( const char *msg ) {
     int l = strlen( msg ) ;
@@ -117,17 +128,18 @@ int parseFloat( double &result, const char *p, int len ) {
     return n + 1 ;
 }
 
+
 void GPS::readDevice() {
 
     char buffer[256] ;
     char *buf_end = buffer + sizeof(buffer) ;
     char *writeStart = buffer ;
-    for( ; ; )  {
+    while( threadAlive )  {
         // read from gpsDev into availableSpace plus maximum left in buffer
         int n = read( gpsDev, writeStart, buf_end - writeStart ) ; 
-        if( n==0 ) continue ;
         if( n<0 ) {
             perror( "read: " ) ;
+            return ;
         }
 
         // replace /r & /n in the just read text
@@ -150,11 +162,6 @@ void GPS::readDevice() {
         while( *p == '$' && p<writeStart ) {
             // std::cout << p << std::endl ;
             parseRMC( p ) ;
-            if( !errorFlag ) {
-                std::cout << std::setprecision(5) << std::fixed 
-                    << longitude << " " 
-                    << latitude << std::endl ;
-            }
             int l = 0 ;
             while( p < writeStart ) {
                 p++ ;
